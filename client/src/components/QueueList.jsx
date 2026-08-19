@@ -10,13 +10,13 @@ export default function QueueList({ queue, clientId, onRemove, onVote }) {
         return (
           <li
             key={item.itemId}
-            className="board-frame-sm flex items-center gap-3 rounded-lg bg-tapri-paper p-2"
+            className="board-frame-sm flex flex-wrap items-center gap-3 rounded-lg bg-tapri-paper p-2"
           >
             <span className="w-5 flex-shrink-0 text-center font-heading text-xs text-tapri-brown-light">
               {i + 1}
             </span>
-            <img src={item.thumbnail} alt="" className="h-10 w-10 rounded object-cover" />
-            <div className="min-w-0 flex-1">
+            <img src={item.thumbnail} alt="" className="h-10 w-10 flex-shrink-0 rounded object-cover" />
+            <div className="min-w-[120px] flex-1">
               <p className="truncate text-sm text-tapri-brown">{item.title}</p>
               <p className="truncate text-xs text-tapri-brown-light">Added by {item.addedBy}</p>
             </div>

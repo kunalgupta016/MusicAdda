@@ -4,12 +4,12 @@ export default function UserList({ users, clientId, isHost, onTransferControl })
       {users.map((user) => (
         <li
           key={user.clientId}
-          className="board-frame-sm flex items-center gap-2 rounded-lg bg-tapri-paper p-2"
+          className="board-frame-sm flex flex-wrap items-center gap-2 rounded-lg bg-tapri-paper p-2"
         >
           <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border-2 border-tapri-brown bg-tapri-mustard font-heading text-sm font-semibold text-tapri-brown">
             {user.name.slice(0, 1).toUpperCase()}
           </div>
-          <span className="min-w-0 flex-1 truncate text-sm text-tapri-brown">
+          <span className="min-w-[60px] flex-1 truncate text-sm text-tapri-brown">
             {user.name}
             {user.clientId === clientId && " (you)"}
           </span>

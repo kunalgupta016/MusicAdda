@@ -35,18 +35,18 @@ export default function NowPlayingBar({ currentTrack, playbackState, duration, i
   return (
     <div className="chalkboard rounded-xl p-4">
       <p className="font-chalk mb-2 text-xs tracking-wide text-tapri-mustard">✷ Now Playing ✷</p>
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-4">
         <img
           src={currentTrack.thumbnail}
           alt=""
           className="h-16 w-16 flex-shrink-0 rounded-lg border-2 border-tapri-chalk/20 object-cover"
         />
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[140px] flex-1">
           <p className="chalk-text truncate text-lg text-tapri-chalk">{currentTrack.title}</p>
           <p className="truncate text-sm text-tapri-chalk/50">Added by {currentTrack.addedBy}</p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {isHost ? (
             <>
               <button

@@ -34,7 +34,7 @@ export default function AddTrackForm({ onAdd }) {
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="Paste a YouTube link…"
-          className="board-frame-sm flex-1 rounded-lg bg-tapri-cream px-3 py-2 text-sm text-tapri-brown placeholder-tapri-brown-light/60 focus:outline-none"
+          className="board-frame-sm min-w-0 flex-1 rounded-lg bg-tapri-cream px-3 py-2 text-sm text-tapri-brown placeholder-tapri-brown-light/60 focus:outline-none"
         />
         <button
           type="submit"

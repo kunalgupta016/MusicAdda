@@ -45,7 +45,7 @@ export default function ChatPanel({ messages, clientId, onSend }) {
           onChange={(e) => setText(e.target.value)}
           placeholder="Type a message…"
           maxLength={500}
-          className="flex-1 rounded-lg bg-tapri-cream px-2 py-1.5 text-sm text-tapri-brown placeholder-tapri-brown-light/60 focus:outline-none"
+          className="min-w-0 flex-1 rounded-lg bg-tapri-cream px-2 py-1.5 text-sm text-tapri-brown placeholder-tapri-brown-light/60 focus:outline-none"
         />
         <button
           type="submit"
