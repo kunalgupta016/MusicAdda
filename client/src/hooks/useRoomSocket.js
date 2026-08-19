@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { socket } from "../lib/socket";
 import { getClientId } from "../lib/identity";
+import { requestNotificationPermission, notifyChatMessage } from "../lib/notify";
+
+const DEFAULT_TITLE = "GrooveSync ☕";
 
 // Owns the socket connection + shared room state for a room page.
 // Server broadcasts the *entire* room state on every change, so the client
@@ -11,11 +14,13 @@ export function useRoomSocket(roomId, name) {
   const [status, setStatus] = useState("connecting"); // connecting | joined | error
   const [error, setError] = useState(null);
   const [chatMessages, setChatMessages] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
     if (!roomId || !name) return;
 
     let cancelled = false;
+    requestNotificationPermission();
     if (!socket.connected) socket.connect();
 
     function join() {
@@ -36,8 +41,17 @@ export function useRoomSocket(roomId, name) {
       if (!cancelled) setState(nextState);
     }
 
+    // A "notification" here means: you weren't looking at this tab when the
+    // message arrived. document.hidden is true whenever the tab is in the
+    // background or the window is minimized — that's the signal, not
+    // whether the chat panel specifically is scrolled into view.
     function onChatMessage(message) {
-      if (!cancelled) setChatMessages((prev) => [...prev, message]);
+      if (cancelled) return;
+      setChatMessages((prev) => [...prev, message]);
+      if (message.clientId !== clientId && document.hidden) {
+        setUnreadCount((prev) => prev + 1);
+        notifyChatMessage(message);
+      }
     }
 
     socket.on("connect", join);
@@ -53,6 +67,22 @@ export function useRoomSocket(roomId, name) {
       socket.off("chat-message", onChatMessage);
     };
   }, [roomId, name, clientId]);
+
+  // Clear unread state the moment the tab comes back into view.
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (!document.hidden) setUnreadCount(0);
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, []);
+
+  useEffect(() => {
+    document.title = unreadCount > 0 ? `(${unreadCount}) ${DEFAULT_TITLE}` : DEFAULT_TITLE;
+    return () => {
+      document.title = DEFAULT_TITLE;
+    };
+  }, [unreadCount]);
 
   const addToQueue = useCallback((url) => {
     return new Promise((resolve) => socket.emit("add-to-queue", { url }, resolve));
@@ -107,6 +137,7 @@ export function useRoomSocket(roomId, name) {
     error,
     isHost,
     chatMessages,
+    unreadCount,
     actions: {
       addToQueue,
       removeFromQueue,

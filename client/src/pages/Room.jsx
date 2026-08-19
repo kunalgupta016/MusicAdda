@@ -63,12 +63,19 @@ function RoomView({ roomId, name }) {
 
   const playerRef = useRef(null);
   const [duration, setDuration] = useState(0);
-  const [muted, setMuted] = useState(false);
+  // Starts muted: browsers block autoplay-with-sound for a player that has
+  // never had a genuine click on this page. Starting muted guarantees the
+  // very first sync (and every auto-advance after it) actually plays instead
+  // of silently failing for anyone who joins and never clicks anything —
+  // one click on the mute button is enough to unlock sound for the rest of
+  // the session, since that click itself counts as the required gesture.
+  const [muted, setMuted] = useState(true);
   const loadedTrackIdRef = useRef(null);
   const [copied, setCopied] = useState(false);
 
   const handlePlayerReady = useCallback((player) => {
     playerRef.current = player;
+    player.mute();
   }, []);
 
   const handleStateChange = useCallback(
@@ -166,6 +173,13 @@ function RoomView({ roomId, name }) {
     }
   }
 
+  // The host pressing Play is a real click, so it doubles as the gesture
+  // that unlocks audio for this tab — no reason to make them click twice.
+  function handleHostPlay() {
+    if (muted) handleToggleMute();
+    playerRef.current?.playVideo();
+  }
+
   if (status === "error") {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center px-4 text-center">
@@ -201,7 +215,7 @@ function RoomView({ roomId, name }) {
       </header>
 
       <main className="mx-auto mt-6 grid max-w-6xl grid-cols-1 gap-6 lg:grid-cols-[2fr_1fr]">
-        <section className="space-y-4">
+        <section className="min-w-0 space-y-4">
           <div className="relative">
             <YoutubePlayer onPlayerReady={handlePlayerReady} onStateChange={handleStateChange} />
             <ReactionOverlay />
@@ -213,7 +227,7 @@ function RoomView({ roomId, name }) {
             duration={duration}
             isHost={isHost}
             muted={muted}
-            onPlay={() => playerRef.current?.playVideo()}
+            onPlay={handleHostPlay}
             onPause={() => playerRef.current?.pauseVideo()}
             onSeekCommit={(value) => {
               playerRef.current?.seekTo(value, true);
@@ -243,7 +257,7 @@ function RoomView({ roomId, name }) {
           </div>
         </section>
 
-        <aside className="space-y-6">
+        <aside className="min-w-0 space-y-6">
           <div>
             <h2 className="mb-2 font-heading text-sm font-semibold uppercase tracking-wide text-tapri-brown-light">
               In the Adda ({state.users.length})
