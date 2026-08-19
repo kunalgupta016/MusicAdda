@@ -9,7 +9,11 @@ import roomRoutes from "./routes/roomRoutes.js";
 import { registerSocketHandlers } from "./sockets/index.js";
 
 const PORT = process.env.PORT || 4000;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+// Browsers never send a trailing slash in the Origin header, so strip one
+// here in case it sneaks into the env var — otherwise a value like
+// "https://example.com/" silently fails to match "https://example.com" and
+// every request gets CORS-blocked.
+const CLIENT_ORIGIN = (process.env.CLIENT_ORIGIN || "http://localhost:5173").replace(/\/+$/, "");
 
 const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN }));
