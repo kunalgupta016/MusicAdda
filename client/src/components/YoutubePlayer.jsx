@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { loadYoutubeIframeApi } from "../lib/loadYoutubeIframeApi";
 
-export default function YoutubePlayer({ onPlayerReady, onStateChange }) {
+export default function YoutubePlayer({ onPlayerReady, onStateChange, onError }) {
   const containerRef = useRef(null);
   const playerRef = useRef(null);
 
@@ -23,6 +23,7 @@ export default function YoutubePlayer({ onPlayerReady, onStateChange }) {
         events: {
           onReady: () => onPlayerReady?.(playerRef.current),
           onStateChange: (e) => onStateChange?.(e),
+          onError: (e) => onError?.(e),
         },
       });
     });

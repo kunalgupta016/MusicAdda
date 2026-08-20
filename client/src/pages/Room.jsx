@@ -84,10 +84,47 @@ function RoomView({ roomId, name }) {
   const [muted, setMuted] = useState(true);
   const loadedTrackIdRef = useRef(null);
   const [copied, setCopied] = useState(false);
+  // Tracks whether the YT iframe has actually finished initializing. On a
+  // slow connection this can take a few seconds — long after the socket
+  // state (with a currentTrack already playing) has arrived. Without this,
+  // the "load track" effect below fires once while playerRef is still null,
+  // silently no-ops, and never gets another chance to run since its only
+  // other dependency (trackId) hasn't changed — leaving a joiner's player
+  // permanently empty even though everyone else's state looks fine.
+  const [playerReady, setPlayerReady] = useState(false);
+  // Bumped to force the "load track" effect to run again after a transient
+  // playback error, even though trackId/playerReady haven't themselves changed.
+  const [reloadTick, setReloadTick] = useState(0);
+  const retriedTrackIdRef = useRef(null);
 
   const handlePlayerReady = useCallback((player) => {
     playerRef.current = player;
     player.mute();
+    setPlayerReady(true);
+  }, []);
+
+  // YouTube error codes: 101/150 mean the video's owner disabled embedding —
+  // permanent, retrying changes nothing, so the host skips it automatically.
+  // Anything else (2, 5, 100, or an unlabeled "try again later") is usually
+  // transient — a network hiccup is enough to trigger it, especially on
+  // mobile — so it's worth one automatic retry before giving up.
+  const handlePlayerError = useCallback((e) => {
+    const track = stateRef.current?.currentTrack;
+    if (!track) return;
+
+    if (e?.data === 101 || e?.data === 150) {
+      if (isHostRef.current) actions.nextSong();
+      return;
+    }
+
+    if (retriedTrackIdRef.current === track.trackId) return; // already retried this one
+    retriedTrackIdRef.current = track.trackId;
+
+    setTimeout(() => {
+      loadedTrackIdRef.current = null;
+      setReloadTick((t) => t + 1);
+    }, 1500);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // YoutubePlayer registers onStateChange once, at mount, and never again —
@@ -156,7 +193,7 @@ function RoomView({ roomId, name }) {
     } else {
       player.cueVideoById({ videoId: track.trackId, startSeconds });
     }
-  }, [state?.currentTrack?.trackId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [state?.currentTrack?.trackId, playerReady, reloadTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Followers stay in sync with the host's playback state. The host is the
   // source of truth for their own player, so they skip this entirely.
@@ -172,7 +209,7 @@ function RoomView({ roomId, name }) {
     if (isPlaying) player.playVideo();
     else player.pauseVideo();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isHost, state?.playbackState?.isPlaying, state?.playbackState?.timestamp, state?.playbackState?.updatedAt]);
+  }, [isHost, playerReady, state?.playbackState?.isPlaying, state?.playbackState?.timestamp, state?.playbackState?.updatedAt]);
 
   // Periodic drift correction for followers while a track is playing.
   useEffect(() => {
@@ -283,7 +320,7 @@ function RoomView({ roomId, name }) {
       <main className="mx-auto mt-6 grid max-w-6xl grid-cols-1 gap-6 lg:grid-cols-[2fr_1fr]">
         <section className="min-w-0 space-y-4">
           <div className="relative">
-            <YoutubePlayer onPlayerReady={handlePlayerReady} onStateChange={handleStateChange} />
+            <YoutubePlayer onPlayerReady={handlePlayerReady} onStateChange={handleStateChange} onError={handlePlayerError} />
             <ReactionOverlay />
           </div>
           <ReactionPicker onReact={actions.sendReaction} />
