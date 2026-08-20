@@ -8,14 +8,14 @@ export function requestNotificationPermission() {
   }
 }
 
-// tag: "groovesync-chat" means a burst of messages while you're away
+// tag: "musicadda-chat" means a burst of messages while you're away
 // collapses into one notification instead of stacking up spam.
 export function notifyChatMessage(message) {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
 
-  const notification = new Notification(`${message.name} · GrooveSync`, {
+  const notification = new Notification(`${message.name} · musicAdda`, {
     body: message.text,
-    tag: "groovesync-chat",
+    tag: "musicadda-chat",
   });
   notification.onclick = () => {
     window.focus();

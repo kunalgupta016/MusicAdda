@@ -1,4 +1,4 @@
-export default function QueueList({ queue, clientId, onRemove, onVote }) {
+export default function QueueList({ queue, clientId, onRemove, onVote, onIncrementRepeat }) {
   if (queue.length === 0) {
     return <p className="font-chalk text-sm text-tapri-brown-light">Queue's empty — quiet in here.</p>;
   }
@@ -7,6 +7,7 @@ export default function QueueList({ queue, clientId, onRemove, onVote }) {
     <ul className="space-y-2">
       {queue.map((item, i) => {
         const hasVoted = item.votes.includes(clientId);
+        const repeatCount = item.repeatCount ?? 1;
         return (
           <li
             key={item.itemId}
@@ -30,6 +31,17 @@ export default function QueueList({ queue, clientId, onRemove, onVote }) {
               }`}
             >
               ▲ {item.votes.length}
+            </button>
+            <button
+              onClick={() => onIncrementRepeat(item.itemId)}
+              title="Play this multiple times in a row when it comes up"
+              className={`tapri-btn flex-shrink-0 rounded-full px-2 py-1 text-xs font-heading font-semibold ${
+                repeatCount > 1
+                  ? "bg-tapri-mustard text-tapri-brown"
+                  : "bg-tapri-cream text-tapri-brown hover:bg-tapri-mustard/30"
+              }`}
+            >
+              🔁 ×{repeatCount}
             </button>
             <button
               onClick={() => onRemove(item.itemId)}

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useRoomSocket } from "../hooks/useRoomSocket";
+import { useWakeLock } from "../hooks/useWakeLock";
+import { useMediaSession } from "../hooks/useMediaSession";
 import { getSavedName, saveName } from "../lib/identity";
 import YoutubePlayer from "../components/YoutubePlayer";
 import ReactionOverlay from "../components/ReactionOverlay";
@@ -78,23 +80,46 @@ function RoomView({ roomId, name }) {
     player.mute();
   }, []);
 
-  const handleStateChange = useCallback(
-    (e) => {
-      const YT = window.YT;
-      if (!YT) return;
-      setDuration(playerRef.current?.getDuration() || 0);
+  // YoutubePlayer registers onStateChange once, at mount, and never again —
+  // so this closure is frozen at whatever isHost/state were right then.
+  // With multiple hosts now possible mid-session (via "Make host"), isHost
+  // can flip long after mount, so it — and state, needed below for repeat
+  // count — have to be read through refs instead of the closed-over values,
+  // or a newly-promoted host's play/pause/ended events would silently never
+  // reach the server.
+  const isHostRef = useRef(isHost);
+  useEffect(() => {
+    isHostRef.current = isHost;
+  }, [isHost]);
 
-      if (!isHost) return;
-      if (e.data === YT.PlayerState.PLAYING) {
-        actions.play(playerRef.current.getCurrentTime());
-      } else if (e.data === YT.PlayerState.PAUSED) {
-        actions.pause(playerRef.current.getCurrentTime());
-      } else if (e.data === YT.PlayerState.ENDED) {
-        actions.nextSong();
+  const stateRef = useRef(state);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  const handleStateChange = useCallback((e) => {
+    const YT = window.YT;
+    if (!YT) return;
+    setDuration(playerRef.current?.getDuration() || 0);
+
+    if (!isHostRef.current) return;
+    if (e.data === YT.PlayerState.PLAYING) {
+      actions.play(playerRef.current.getCurrentTime());
+    } else if (e.data === YT.PlayerState.PAUSED) {
+      actions.pause(playerRef.current.getCurrentTime());
+    } else if (e.data === YT.PlayerState.ENDED) {
+      // If this track still has repeats left, restart it locally right away
+      // instead of waiting on the server round trip — trackEnded() then
+      // updates playbackState (and decrements the count) for everyone else.
+      const repeatsLeft = stateRef.current?.currentTrack?.repeatCount ?? 1;
+      if (repeatsLeft > 1) {
+        playerRef.current.seekTo(0, true);
+        playerRef.current.playVideo();
       }
-    },
-    [isHost, actions]
-  );
+      actions.trackEnded();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load whatever track the server says is current — applies to everyone,
   // host included, since the host also needs the new video loaded when the
@@ -180,6 +205,37 @@ function RoomView({ roomId, name }) {
     playerRef.current?.playVideo();
   }
 
+  function handleHostPause() {
+    playerRef.current?.pauseVideo();
+  }
+
+  function handleSeekBy(deltaSeconds) {
+    const player = playerRef.current;
+    if (!player || !player.getCurrentTime) return;
+    const target = Math.max(0, player.getCurrentTime() + deltaSeconds);
+    const clamped = duration ? Math.min(target, duration) : target;
+    player.seekTo(clamped, true);
+    actions.seek(clamped);
+  }
+
+  // Best-effort background playback support. Neither of these can force a
+  // phone's OS to keep a browser tab alive — that's outside what any
+  // website's JS can control — they just make it as usable as the platform
+  // allows: Wake Lock stops the screen from auto-locking from inactivity
+  // while a track is actively playing, and Media Session gives proper
+  // lock-screen/notification controls for whenever playback does continue
+  // (mainly Android Chrome; iOS Safari suspends background tabs regardless).
+  useWakeLock(!!state?.playbackState?.isPlaying);
+  useMediaSession({
+    track: state?.currentTrack,
+    isPlaying: !!state?.playbackState?.isPlaying,
+    isHost,
+    onPlay: handleHostPlay,
+    onPause: handleHostPause,
+    onNext: actions.nextSong,
+    onToggleMute: handleToggleMute,
+  });
+
   if (status === "error") {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center px-4 text-center">
@@ -204,7 +260,7 @@ function RoomView({ roomId, name }) {
     <div className="min-h-screen px-4 py-6 sm:px-8">
       <header className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2">
         <h1 className="font-heading text-2xl font-bold text-tapri-brown">
-          Groove<span className="text-tapri-terracotta">Sync</span> <span className="text-lg">☕</span>
+          music<span className="text-tapri-terracotta">Adda</span> <span className="text-lg">☕</span>
         </h1>
         <button
           onClick={handleCopyLink}
@@ -228,13 +284,15 @@ function RoomView({ roomId, name }) {
             isHost={isHost}
             muted={muted}
             onPlay={handleHostPlay}
-            onPause={() => playerRef.current?.pauseVideo()}
+            onPause={handleHostPause}
             onSeekCommit={(value) => {
               playerRef.current?.seekTo(value, true);
               actions.seek(value);
             }}
+            onSeekBy={handleSeekBy}
             onNext={actions.nextSong}
             onToggleMute={handleToggleMute}
+            onIncrementRepeat={actions.incrementRepeat}
           />
 
           <div>
@@ -253,6 +311,7 @@ function RoomView({ roomId, name }) {
               clientId={clientId}
               onRemove={actions.removeFromQueue}
               onVote={actions.voteForTrack}
+              onIncrementRepeat={actions.incrementRepeat}
             />
           </div>
         </section>
@@ -262,7 +321,7 @@ function RoomView({ roomId, name }) {
             <h2 className="mb-2 font-heading text-sm font-semibold uppercase tracking-wide text-tapri-brown-light">
               In the Adda ({state.users.length})
             </h2>
-            <UserList users={state.users} clientId={clientId} isHost={isHost} onTransferControl={actions.transferControl} />
+            <UserList users={state.users} clientId={clientId} isHost={isHost} onMakeHost={actions.makeHost} />
           </div>
 
           <div>
@@ -276,7 +335,12 @@ function RoomView({ roomId, name }) {
             <h2 className="mb-2 font-heading text-sm font-semibold uppercase tracking-wide text-tapri-brown-light">
               Played Earlier
             </h2>
-            <HistoryPanel history={state.history} onReplay={actions.replayTrack} />
+            <HistoryPanel
+              history={state.history}
+              isHost={isHost}
+              onReplayNow={actions.replayNow}
+              onQueue={actions.queueFromHistory}
+            />
           </div>
         </aside>
       </main>

@@ -1,4 +1,4 @@
-export default function UserList({ users, clientId, isHost, onTransferControl }) {
+export default function UserList({ users, clientId, isHost, onMakeHost }) {
   return (
     <ul className="space-y-2">
       {users.map((user) => (
@@ -20,7 +20,7 @@ export default function UserList({ users, clientId, isHost, onTransferControl })
           )}
           {isHost && !user.isHost && (
             <button
-              onClick={() => onTransferControl(user.clientId)}
+              onClick={() => onMakeHost(user.clientId)}
               className="tapri-btn flex-shrink-0 rounded-full bg-tapri-cream px-2 py-0.5 text-xs text-tapri-brown hover:bg-tapri-mustard/40"
             >
               Make host

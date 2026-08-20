@@ -1,12 +1,15 @@
 import {
   joinRoom,
   disconnectSocket,
-  transferControl,
+  addHost,
   addToQueue,
-  replayFromHistory,
+  queueFromHistory,
+  replayNow,
   removeFromQueue,
   voteForTrack,
+  incrementRepeat,
   nextSong,
+  trackEnded,
   setPlayback,
   sendMessage,
   serializeRoom,
@@ -82,14 +85,38 @@ export function registerRoomHandlers(io, socket) {
     broadcastState(io, roomId);
   });
 
-  socket.on("replay-track", async ({ historyItemId }, ack) => {
+  socket.on("increment-repeat", ({ itemId }, ack) => {
+    const { roomId } = socket.data;
+    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+    const updated = incrementRepeat(roomId, itemId);
+    if (!updated) return ack?.({ ok: false, error: "Track not found" });
+    ack?.({ ok: true });
+    broadcastState(io, roomId);
+  });
+
+  // Adds a past track back into the queue — normal add-to-queue semantics.
+  socket.on("queue-from-history", async ({ historyItemId }, ack) => {
     const { roomId, clientId } = socket.data;
     if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
 
     const room = getRoom(roomId);
     const addedBy = room?.users.get(clientId)?.name ?? "Unknown";
-    const updated = await replayFromHistory(roomId, historyItemId, addedBy);
+    const updated = await queueFromHistory(roomId, historyItemId, addedBy);
     if (!updated) return ack?.({ ok: false, error: "Not found in history" });
+    ack?.({ ok: true });
+    broadcastState(io, roomId);
+  });
+
+  // Plays a past track right now, interrupting whatever's currently playing.
+  socket.on("replay-now", ({ historyItemId }, ack) => {
+    const { roomId, clientId } = socket.data;
+    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+    const room = getRoom(roomId);
+    const addedBy = room?.users.get(clientId)?.name ?? "Unknown";
+    const updated = replayNow(roomId, clientId, historyItemId, addedBy);
+    if (!updated) return ack?.({ ok: false, error: "Only a host can replay a track immediately" });
     ack?.({ ok: true });
     broadcastState(io, roomId);
   });
@@ -131,16 +158,30 @@ export function registerRoomHandlers(io, socket) {
     broadcastState(io, roomId);
   });
 
+  // Natural end-of-track (not a manual Skip) — respects repeatCount.
+  socket.on("track-ended", (_payload, ack) => {
+    const { roomId } = socket.data;
+    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+    const updated = trackEnded(roomId);
+    if (!updated) return ack?.({ ok: false, error: "Room not found" });
+    ack?.({ ok: true });
+    broadcastState(io, roomId);
+  });
+
   socket.on("play", ({ timestamp }, ack) => handlePlayback(socket, io, ack, { isPlaying: true, timestamp }));
   socket.on("pause", ({ timestamp }, ack) => handlePlayback(socket, io, ack, { isPlaying: false, timestamp }));
   socket.on("seek", ({ timestamp }, ack) => handlePlayback(socket, io, ack, { timestamp }));
 
-  socket.on("transfer-control", ({ targetClientId }, ack) => {
+  // Any existing host can grant host status to someone else — adds them
+  // alongside the current hosts rather than replacing anyone, so a room can
+  // have several hosts driving playback at once.
+  socket.on("make-host", ({ targetClientId }, ack) => {
     const { roomId, clientId } = socket.data;
     if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
 
-    const updated = transferControl(roomId, clientId, targetClientId);
-    if (!updated) return ack?.({ ok: false, error: "Only the host can hand off control" });
+    const updated = addHost(roomId, clientId, targetClientId);
+    if (!updated) return ack?.({ ok: false, error: "Only a host can grant host access" });
     ack?.({ ok: true });
     broadcastState(io, roomId);
   });
@@ -159,7 +200,7 @@ function handlePlayback(socket, io, ack, changes) {
   if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
 
   const updated = setPlayback(roomId, clientId, changes);
-  if (!updated) return ack?.({ ok: false, error: "Only the host can control playback" });
+  if (!updated) return ack?.({ ok: false, error: "Only a host can control playback" });
   ack?.({ ok: true });
   broadcastState(io, roomId);
 }

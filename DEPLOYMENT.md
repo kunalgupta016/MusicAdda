@@ -1,4 +1,4 @@
-# Deploying GrooveSync — step by step
+# Deploying musicAdda — step by step
 
 Personal reference for deploying this project: **frontend → Vercel**, **backend → Render**, **database → MongoDB Atlas** (you already have this set up). This file is for you — feel free to keep it out of the public repo (add it to `.gitignore`) or leave it in, your call.
 

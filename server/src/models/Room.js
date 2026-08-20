@@ -10,6 +10,7 @@ const QueueItemSchema = new mongoose.Schema(
     addedBy: { type: String, default: "Unknown" },
     addedAt: { type: Date, default: Date.now },
     votes: { type: [String], default: [] },
+    repeatCount: { type: Number, default: 1 },
   },
   { _id: false }
 );
@@ -50,7 +51,7 @@ const PlaybackStateSchema = new mongoose.Schema(
 
 const RoomSchema = new mongoose.Schema({
   roomId: { type: String, required: true, unique: true, index: true },
-  hostClientId: { type: String, default: null },
+  hostClientIds: { type: [String], default: [] },
   queue: { type: [QueueItemSchema], default: [] },
   currentTrack: { type: QueueItemSchema, default: null },
   playbackState: { type: PlaybackStateSchema, default: () => ({}) },

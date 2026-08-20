@@ -42,7 +42,7 @@ export default function Home() {
           your very own chai-tapri for music
         </p>
         <h1 className="mt-1 font-heading text-5xl font-bold text-tapri-brown">
-          Groove<span className="text-tapri-terracotta">Sync</span>
+          music<span className="text-tapri-terracotta">Adda</span>
           <span className="ml-2 inline-block rotate-6">☕</span>
         </h1>
         <p className="mx-auto mt-3 max-w-sm text-sm text-tapri-brown-light">

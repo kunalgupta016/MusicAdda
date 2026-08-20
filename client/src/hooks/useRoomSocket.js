@@ -3,7 +3,7 @@ import { socket } from "../lib/socket";
 import { getClientId } from "../lib/identity";
 import { requestNotificationPermission, notifyChatMessage } from "../lib/notify";
 
-const DEFAULT_TITLE = "GrooveSync ☕";
+const DEFAULT_TITLE = "musicAdda ☕";
 
 // Owns the socket connection + shared room state for a room page.
 // Server broadcasts the *entire* room state on every change, so the client
@@ -96,12 +96,24 @@ export function useRoomSocket(roomId, name) {
     socket.emit("vote-queue-item", { itemId });
   }, []);
 
-  const replayTrack = useCallback((historyItemId) => {
-    socket.emit("replay-track", { historyItemId });
+  const incrementRepeat = useCallback((itemId) => {
+    socket.emit("increment-repeat", { itemId });
+  }, []);
+
+  const queueFromHistory = useCallback((historyItemId) => {
+    socket.emit("queue-from-history", { historyItemId });
+  }, []);
+
+  const replayNow = useCallback((historyItemId) => {
+    socket.emit("replay-now", { historyItemId });
   }, []);
 
   const nextSong = useCallback(() => {
     socket.emit("next-song", {});
+  }, []);
+
+  const trackEnded = useCallback(() => {
+    socket.emit("track-ended", {});
   }, []);
 
   const play = useCallback((timestamp) => {
@@ -116,8 +128,8 @@ export function useRoomSocket(roomId, name) {
     socket.emit("seek", { timestamp });
   }, []);
 
-  const transferControl = useCallback((targetClientId) => {
-    socket.emit("transfer-control", { targetClientId });
+  const makeHost = useCallback((targetClientId) => {
+    socket.emit("make-host", { targetClientId });
   }, []);
 
   const sendMessage = useCallback((text) => {
@@ -128,7 +140,7 @@ export function useRoomSocket(roomId, name) {
     socket.emit("reaction", { emoji });
   }, []);
 
-  const isHost = state?.hostClientId === clientId;
+  const isHost = state?.hostClientIds?.includes(clientId) ?? false;
 
   return {
     clientId,
@@ -142,12 +154,15 @@ export function useRoomSocket(roomId, name) {
       addToQueue,
       removeFromQueue,
       voteForTrack,
-      replayTrack,
+      incrementRepeat,
+      queueFromHistory,
+      replayNow,
       nextSong,
+      trackEnded,
       play,
       pause,
       seek,
-      transferControl,
+      makeHost,
       sendMessage,
       sendReaction,
     },

@@ -7,7 +7,7 @@ function formatTime(seconds) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-export default function NowPlayingBar({ currentTrack, playbackState, duration, isHost, muted, onPlay, onPause, onSeekCommit, onNext, onToggleMute }) {
+export default function NowPlayingBar({ currentTrack, playbackState, duration, isHost, muted, onPlay, onPause, onSeekCommit, onSeekBy, onNext, onToggleMute, onIncrementRepeat }) {
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -43,17 +43,44 @@ export default function NowPlayingBar({ currentTrack, playbackState, duration, i
         />
         <div className="min-w-[140px] flex-1">
           <p className="chalk-text truncate text-lg text-tapri-chalk">{currentTrack.title}</p>
-          <p className="truncate text-sm text-tapri-chalk/50">Added by {currentTrack.addedBy}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="truncate text-sm text-tapri-chalk/50">Added by {currentTrack.addedBy}</p>
+            <button
+              onClick={() => onIncrementRepeat(currentTrack.itemId)}
+              title="Play this multiple times in a row before moving on"
+              className={`flex-shrink-0 rounded-full border px-2 py-0.5 text-xs ${
+                (currentTrack.repeatCount ?? 1) > 1
+                  ? "border-tapri-mustard text-tapri-mustard"
+                  : "border-tapri-chalk/25 text-tapri-chalk/60 hover:border-tapri-mustard/60"
+              }`}
+            >
+              🔁 ×{currentTrack.repeatCount ?? 1}
+            </button>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {isHost ? (
             <>
               <button
+                onClick={() => onSeekBy(-10)}
+                title="Back 10 seconds"
+                className="tapri-btn rounded-full bg-tapri-cream px-3 py-2 text-sm font-semibold text-tapri-brown hover:bg-tapri-mustard/30"
+              >
+                ⏪ 10
+              </button>
+              <button
                 onClick={isPlaying ? onPause : onPlay}
                 className="tapri-btn rounded-full bg-tapri-terracotta px-4 py-2 text-sm font-semibold text-tapri-cream hover:bg-tapri-terracotta-dark"
               >
                 {isPlaying ? "Pause" : "Play"}
+              </button>
+              <button
+                onClick={() => onSeekBy(10)}
+                title="Forward 10 seconds"
+                className="tapri-btn rounded-full bg-tapri-cream px-3 py-2 text-sm font-semibold text-tapri-brown hover:bg-tapri-mustard/30"
+              >
+                10 ⏩
               </button>
               <button
                 onClick={onNext}
