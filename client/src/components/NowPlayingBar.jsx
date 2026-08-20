@@ -38,7 +38,9 @@ export default function NowPlayingBar({ currentTrack, playbackState, duration, i
       <div className="flex flex-wrap items-center gap-4">
         <img
           src={currentTrack.thumbnail}
-          alt=""
+          alt={`${currentTrack.title} thumbnail`}
+          width="64"
+          height="64"
           className="h-16 w-16 flex-shrink-0 rounded-lg border-2 border-tapri-chalk/20 object-cover"
         />
         <div className="min-w-[140px] flex-1">

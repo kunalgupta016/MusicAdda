@@ -4,6 +4,7 @@ import { useRoomSocket } from "../hooks/useRoomSocket";
 import { useWakeLock } from "../hooks/useWakeLock";
 import { useMediaSession } from "../hooks/useMediaSession";
 import { getSavedName, saveName } from "../lib/identity";
+import Seo from "../components/Seo";
 import YoutubePlayer from "../components/YoutubePlayer";
 import ReactionOverlay from "../components/ReactionOverlay";
 import ReactionPicker from "../components/ReactionPicker";
@@ -56,8 +57,17 @@ export default function Room() {
   const { roomId } = useParams();
   const [name, setName] = useState(getSavedName());
 
-  if (!name) return <NameGate onSubmit={setName} />;
-  return <RoomView roomId={roomId} name={name} />;
+  return (
+    <>
+      <Seo
+        title={`Room ${roomId} | musicAdda`}
+        description="A private musicAdda listening room for synchronized YouTube playback, chat, reactions, and queue voting."
+        path={`/room/${roomId}`}
+        noindex
+      />
+      {!name ? <NameGate onSubmit={setName} /> : <RoomView roomId={roomId} name={name} />}
+    </>
+  );
 }
 
 function RoomView({ roomId, name }) {

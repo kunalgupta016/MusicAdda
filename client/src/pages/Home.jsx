@@ -1,10 +1,13 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import Seo from "../components/Seo";
+import { getSiteUrl } from "../lib/site";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:4000";
 
 export default function Home() {
   const navigate = useNavigate();
+  const siteUrl = getSiteUrl();
   const [joinCode, setJoinCode] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState(null);
@@ -30,7 +33,28 @@ export default function Home() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center px-4 text-center">
+    <main className="flex min-h-screen flex-col items-center justify-center px-4 text-center">
+      <Seo
+        title="musicAdda | Listen to YouTube together in sync"
+        description="Create a musicAdda listening room, share one link, and listen to YouTube together with synced playback, chat, reactions, and queue voting."
+        schema={{
+          "@context": "https://schema.org",
+          "@graph": [
+            {
+              "@type": "Organization",
+              name: "musicAdda",
+              url: `${siteUrl}/`,
+              logo: `${siteUrl}/favicon.png`,
+            },
+            {
+              "@type": "WebSite",
+              name: "musicAdda",
+              url: `${siteUrl}/`,
+              description: "Listen to YouTube together in sync with a shared listening room.",
+            },
+          ],
+        }}
+      />
       <div className="bunting mb-4 w-full max-w-md">
         {Array.from({ length: 15 }).map((_, i) => (
           <span key={i} />
@@ -85,6 +109,6 @@ export default function Home() {
       <p className="mt-6 font-chalk text-sm text-tapri-brown-light">
         no login, no hassle — just a name and good music ☕
       </p>
-    </div>
+    </main>
   );
 }

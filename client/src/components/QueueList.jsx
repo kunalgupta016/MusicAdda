@@ -16,7 +16,7 @@ export default function QueueList({ queue, clientId, onRemove, onVote, onIncreme
             <span className="w-5 flex-shrink-0 text-center font-heading text-xs text-tapri-brown-light">
               {i + 1}
             </span>
-            <img src={item.thumbnail} alt="" className="h-10 w-10 flex-shrink-0 rounded object-cover" />
+            <img src={item.thumbnail} alt={`${item.title} thumbnail`} width="40" height="40" loading="lazy" className="h-10 w-10 flex-shrink-0 rounded object-cover" />
             <div className="min-w-[120px] flex-1">
               <p className="truncate text-sm text-tapri-brown">{item.title}</p>
               <p className="truncate text-xs text-tapri-brown-light">Added by {item.addedBy}</p>
