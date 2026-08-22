@@ -1,14 +1,50 @@
+// ---------------------------------------------------------------------------
+// Room Manager — In-memory state + MongoDB persistence
+// ---------------------------------------------------------------------------
+// Security hardening applied:
+//   • Room ID length increased from 6 → 8 (~852 B combinations)
+//   • MAX_ROOMS cap to prevent resource exhaustion
+//   • Room TTL — evict rooms with zero connected users for > 30 min
+//   • Max 50 users per room
+//   • Max 100 items in queue
+//   • addedByClientId tracked for permission-checked removal
+//   • track-ended debounce to prevent rapid queue drain
+//   • Structured logging (never leaks sensitive data)
+// ---------------------------------------------------------------------------
+
 import { nanoid, customAlphabet } from "nanoid";
 import Room from "../models/Room.js";
 import { isDbConnected } from "../config/db.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("roomManager");
+
+// ---------------------------------------------------------------------------
+// Constants & Limits
+// ---------------------------------------------------------------------------
 
 const roomIdAlphabet = "abcdefghijkmnpqrstuvwxyz23456789"; // no ambiguous chars
-const generateRoomId = customAlphabet(roomIdAlphabet, 6);
+const ROOM_ID_LENGTH = 8; // was 6 → 31^8 ≈ 852 B combinations
+const generateRoomId = customAlphabet(roomIdAlphabet, ROOM_ID_LENGTH);
+
+const MAX_ROOMS         = 1000;
+const MAX_USERS_PER_ROOM = 50;
+const MAX_QUEUE_SIZE    = 100;
+const MAX_HISTORY       = 50;
+const MAX_MESSAGES      = 200;
+const MAX_REPEAT        = 10;
+const ROOM_TTL_MS       = 30 * 60 * 1000;           // 30 minutes with 0 users
+const CLEANUP_INTERVAL  = 5 * 60 * 1000;             // run cleanup every 5 min
+const TRACK_ENDED_DEBOUNCE_MS = 3000;                // 3 s debounce
 
 // In-memory source of truth for active rooms. MongoDB is used only for
 // durability (surviving server restarts) — every real-time read/write
 // happens against this map so playback stays low-latency.
 const rooms = new Map();
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function freshPlaybackState() {
   return { isPlaying: false, timestamp: 0, updatedAt: Date.now() };
@@ -17,17 +53,18 @@ function freshPlaybackState() {
 function newRoomState(roomId) {
   return {
     roomId,
-    hostClientIds: new Set(), // multiple people can hold host at once
-    users: new Map(), // clientId -> { name, socketId, connected }
+    hostClientIds: new Set(),
+    users: new Map(),               // clientId -> { name, socketId, connected }
     queue: [],
     currentTrack: null,
     playbackState: freshPlaybackState(),
-    history: [], // most-recently-played first, capped at 50
-    messages: [], // chat log, capped at 200
+    history: [],                    // most-recently-played first, capped at MAX_HISTORY
+    messages: [],                   // chat log, capped at MAX_MESSAGES
+    lastEmptyAt: null,              // timestamp when last user disconnected (for TTL)
+    lastTrackEndedAt: 0,            // debounce guard for track-ended events
   };
 }
 
-// Fire-and-forget persistence — never blocks the real-time path.
 function persist(room) {
   if (!isDbConnected()) return;
   Room.findOneAndUpdate(
@@ -43,13 +80,9 @@ function persist(room) {
       lastActiveAt: new Date(),
     },
     { upsert: true }
-  ).catch((err) => console.error(`[roomManager] persist failed for ${room.roomId}:`, err.message));
+  ).catch((err) => log.error(`persist failed for ${room.roomId}:`, err.message));
 }
 
-// Keeps the queue ordered by votes — most-voted first, ties broken by who
-// was added earlier. This is what makes voting actually change play order
-// instead of being decorative: nextSong() just takes queue[0], so whichever
-// track has the most upvotes plays next, no host approval needed.
 function sortQueueByVotes(room) {
   room.queue.sort((a, b) => b.votes.length - a.votes.length || a.addedAt - b.addedAt);
 }
@@ -58,7 +91,47 @@ function hasConnectedHost(room) {
   return Array.from(room.hostClientIds).some((id) => room.users.get(id)?.connected);
 }
 
+function countConnectedUsers(room) {
+  let count = 0;
+  for (const u of room.users.values()) if (u.connected) count++;
+  return count;
+}
+
+// ---------------------------------------------------------------------------
+// Room TTL Cleanup (runs every CLEANUP_INTERVAL)
+// ---------------------------------------------------------------------------
+
+function cleanupStaleRooms() {
+  const now = Date.now();
+  for (const [roomId, room] of rooms) {
+    if (countConnectedUsers(room) === 0) {
+      if (!room.lastEmptyAt) {
+        room.lastEmptyAt = now;
+      } else if (now - room.lastEmptyAt > ROOM_TTL_MS) {
+        rooms.delete(roomId);
+        log.info(`Evicted stale room ${roomId} (no users for ${Math.round(ROOM_TTL_MS / 60000)} min)`);
+      }
+    } else {
+      room.lastEmptyAt = null; // reset — someone is still connected
+    }
+  }
+}
+
+const _cleanupTimer = setInterval(cleanupStaleRooms, CLEANUP_INTERVAL);
+// Allow the Node process to exit even if the timer is still running.
+if (_cleanupTimer.unref) _cleanupTimer.unref();
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 export async function createRoom() {
+  // SECURITY: prevent resource exhaustion
+  if (rooms.size >= MAX_ROOMS) {
+    log.warn(`Room creation rejected — MAX_ROOMS (${MAX_ROOMS}) reached`);
+    return null;
+  }
+
   let roomId = generateRoomId();
   while (rooms.has(roomId)) roomId = generateRoomId();
 
@@ -77,7 +150,6 @@ export async function roomExists(roomId) {
   return false;
 }
 
-// Loads a room into memory (from DB if needed) and returns it, or null if it truly doesn't exist.
 async function loadRoom(roomId) {
   if (rooms.has(roomId)) return rooms.get(roomId);
 
@@ -120,13 +192,17 @@ export async function joinRoom(roomId, clientId, socketId, name) {
   const room = await loadRoom(roomId);
   if (!room) return null;
 
+  // SECURITY: limit max users per room
+  const existingUser = room.users.get(clientId);
+  if (!existingUser && countConnectedUsers(room) >= MAX_USERS_PER_ROOM) {
+    return "ROOM_FULL";
+  }
+
   const hadNoConnectedUsers = Array.from(room.users.values()).every((u) => !u.connected);
 
   room.users.set(clientId, { name, socketId, connected: true });
+  room.lastEmptyAt = null; // room is active
 
-  // First connected user becomes host if no host is currently connected.
-  // Doesn't replace any other host — this only fires when the room would
-  // otherwise be host-less.
   if (!hasConnectedHost(room)) {
     room.hostClientIds.add(clientId);
   }
@@ -144,43 +220,36 @@ export function disconnectSocket(roomId, clientId, socketId) {
   if (!room) return null;
 
   const user = room.users.get(clientId);
-  if (!user || user.socketId !== socketId) return room; // stale/replaced connection
+  if (!user || user.socketId !== socketId) return room;
 
   user.connected = false;
   room.hostClientIds.delete(clientId);
 
-  // Only fall back to auto-promoting someone if that was the last host
-  // standing — with multiple hosts, one leaving shouldn't demote anyone
-  // still connected.
   if (!hasConnectedHost(room)) {
     const nextUser = Array.from(room.users.entries()).find(([, u]) => u.connected);
     if (nextUser) room.hostClientIds.add(nextUser[0]);
   }
 
+  // Mark when the room became empty (for TTL cleanup)
+  if (countConnectedUsers(room) === 0) {
+    room.lastEmptyAt = Date.now();
+  }
+
   return room;
 }
 
-// Any existing host can grant host status to someone else — this adds them
-// alongside the current hosts rather than replacing anyone, so a room can
-// have several hosts at once. A listener can't grant it to themselves.
 export function addHost(roomId, requesterClientId, targetClientId) {
   const room = rooms.get(roomId);
   if (!room) return null;
-  if (!room.hostClientIds.has(requesterClientId)) return null; // only a host can promote someone
-  if (!room.users.get(targetClientId)?.connected) return null; // target must be present
+  if (!room.hostClientIds.has(requesterClientId)) return null;
+  if (!room.users.get(targetClientId)?.connected) return null;
 
   room.hostClientIds.add(targetClientId);
   persist(room);
   return room;
 }
 
-const MAX_REPEAT = 10;
-
-// If this exact track is already current or already queued, don't add a
-// second copy — bump its repeat count instead. This is what lets someone
-// "queue the same song again" actually mean "play it again" rather than
-// leaving two identical rows sitting in the queue.
-export async function addToQueue(roomId, { source = "youtube", trackId, title, thumbnail, addedBy }) {
+export async function addToQueue(roomId, { source = "youtube", trackId, title, thumbnail, addedBy, addedByClientId = "" }) {
   const room = await loadRoom(roomId);
   if (!room) return null;
 
@@ -197,6 +266,11 @@ export async function addToQueue(roomId, { source = "youtube", trackId, title, t
     return room;
   }
 
+  // SECURITY: enforce queue size limit
+  if (room.queue.length >= MAX_QUEUE_SIZE) {
+    return "QUEUE_FULL";
+  }
+
   const item = {
     itemId: nanoid(10),
     source,
@@ -204,6 +278,7 @@ export async function addToQueue(roomId, { source = "youtube", trackId, title, t
     title,
     thumbnail,
     addedBy,
+    addedByClientId,
     addedAt: new Date(),
     votes: [],
     repeatCount: 1,
@@ -221,11 +296,12 @@ export async function addToQueue(roomId, { source = "youtube", trackId, title, t
   return room;
 }
 
-// Lets anyone directly set how many times a track should repeat, cycling
-// 1 → 2 → … → MAX_REPEAT → back to 1, without needing to re-paste the link.
-export function incrementRepeat(roomId, itemId) {
+// SECURITY: only hosts can change repeat count
+export function incrementRepeat(roomId, itemId, clientId) {
   const room = rooms.get(roomId);
   if (!room) return null;
+  // Permission: only hosts may change repeat
+  if (!room.hostClientIds.has(clientId)) return "NOT_HOST";
 
   if (room.currentTrack?.itemId === itemId) {
     room.currentTrack.repeatCount = ((room.currentTrack.repeatCount ?? 1) % MAX_REPEAT) + 1;
@@ -240,9 +316,7 @@ export function incrementRepeat(roomId, itemId) {
   return room;
 }
 
-// Adds a past track back into the queue (normal add-to-queue semantics —
-// joins the vote-sorted queue, or plays immediately if nothing's current).
-export async function queueFromHistory(roomId, historyItemId, addedBy) {
+export async function queueFromHistory(roomId, historyItemId, addedBy, addedByClientId = "") {
   const room = rooms.get(roomId);
   if (!room) return null;
   const original = room.history.find((h) => h.itemId === historyItemId);
@@ -254,13 +328,10 @@ export async function queueFromHistory(roomId, historyItemId, addedBy) {
     title: original.title,
     thumbnail: original.thumbnail,
     addedBy,
+    addedByClientId,
   });
 }
 
-// Plays a past track right now, interrupting whatever's currently playing
-// (which itself gets logged to history so nothing's lost). Distinct from
-// queueFromHistory: this jumps straight to playing instead of waiting in
-// the queue — same permission tier as Skip, so only a host can do it.
 export function replayNow(roomId, clientId, historyItemId, addedBy) {
   const room = rooms.get(roomId);
   if (!room) return null;
@@ -271,7 +342,7 @@ export function replayNow(roomId, clientId, historyItemId, addedBy) {
   if (room.currentTrack) {
     const { itemId, source, trackId, title, thumbnail, addedBy: prevAddedBy, addedAt } = room.currentTrack;
     room.history.unshift({ itemId, source, trackId, title, thumbnail, addedBy: prevAddedBy, addedAt, playedAt: new Date() });
-    if (room.history.length > 50) room.history.length = 50;
+    if (room.history.length > MAX_HISTORY) room.history.length = MAX_HISTORY;
   }
 
   room.currentTrack = {
@@ -281,6 +352,7 @@ export function replayNow(roomId, clientId, historyItemId, addedBy) {
     title: original.title,
     thumbnail: original.thumbnail,
     addedBy,
+    addedByClientId: clientId,
     addedAt: new Date(),
     votes: [],
   };
@@ -290,17 +362,24 @@ export function replayNow(roomId, clientId, historyItemId, addedBy) {
   return room;
 }
 
-export function removeFromQueue(roomId, itemId) {
+// SECURITY: only host OR the track owner can remove
+export function removeFromQueue(roomId, itemId, clientId) {
   const room = rooms.get(roomId);
   if (!room) return null;
+
+  const item = room.queue.find((i) => i.itemId === itemId);
+  if (!item) return null;
+
+  // Permission: host or the person who added the track
+  const isHostUser = room.hostClientIds.has(clientId);
+  const isOwner = item.addedByClientId && item.addedByClientId === clientId;
+  if (!isHostUser && !isOwner) return "NOT_AUTHORIZED";
+
   room.queue = room.queue.filter((i) => i.itemId !== itemId);
   persist(room);
   return room;
 }
 
-// Anyone can vote (toggle) — this is the "democratic" alternative to
-// host-controlled ordering: the queue always stays sorted by votes, so
-// nextSong() naturally advances to whatever the room upvoted most.
 export function voteForTrack(roomId, itemId, clientId) {
   const room = rooms.get(roomId);
   if (!room) return null;
@@ -316,16 +395,17 @@ export function voteForTrack(roomId, itemId, clientId) {
   return room;
 }
 
-// Explicit "Skip" — always truly advances to the next track, even if the
-// current one still has repeats left. Skip means skip.
-export function nextSong(roomId) {
+// SECURITY: only hosts can skip
+export function nextSong(roomId, clientId) {
   const room = rooms.get(roomId);
   if (!room) return null;
+  // Permission: only hosts may skip
+  if (clientId && !room.hostClientIds.has(clientId)) return "NOT_HOST";
 
   if (room.currentTrack) {
     const { itemId, source, trackId, title, thumbnail, addedBy, addedAt } = room.currentTrack;
     room.history.unshift({ itemId, source, trackId, title, thumbnail, addedBy, addedAt, playedAt: new Date() });
-    if (room.history.length > 50) room.history.length = 50;
+    if (room.history.length > MAX_HISTORY) room.history.length = MAX_HISTORY;
   }
 
   room.currentTrack = room.queue.shift() ?? null;
@@ -334,12 +414,16 @@ export function nextSong(roomId) {
   return room;
 }
 
-// Called when a track finishes naturally (not skipped). If it still has
-// repeats left, it plays again in place instead of advancing — only once
-// its repeats are used up does the queue move on, same as nextSong().
+// SECURITY: debounced — only process if 3 s since last track-ended for this room
 export function trackEnded(roomId) {
   const room = rooms.get(roomId);
   if (!room) return null;
+
+  const now = Date.now();
+  if (now - room.lastTrackEndedAt < TRACK_ENDED_DEBOUNCE_MS) {
+    return room; // debounce — ignore duplicate
+  }
+  room.lastTrackEndedAt = now;
 
   if (room.currentTrack && (room.currentTrack.repeatCount ?? 1) > 1) {
     room.currentTrack.repeatCount -= 1;
@@ -348,7 +432,9 @@ export function trackEnded(roomId) {
     return room;
   }
 
-  return nextSong(roomId);
+  // Advance to next — no clientId check here since track-ended is a natural
+  // end-of-playback event, not a user-initiated skip.
+  return nextSong(roomId, null);
 }
 
 export function sendMessage(roomId, clientId, name, text) {
@@ -357,7 +443,7 @@ export function sendMessage(roomId, clientId, name, text) {
 
   const message = { id: nanoid(10), clientId, name, text, sentAt: Date.now() };
   room.messages.push(message);
-  if (room.messages.length > 200) room.messages.shift();
+  if (room.messages.length > MAX_MESSAGES) room.messages.shift();
 
   persist(room);
   return message;
@@ -366,11 +452,13 @@ export function sendMessage(roomId, clientId, name, text) {
 export function setPlayback(roomId, clientId, { isPlaying, timestamp }) {
   const room = rooms.get(roomId);
   if (!room) return null;
-  if (!room.hostClientIds.has(clientId)) return null; // only a host may drive playback
+  if (!room.hostClientIds.has(clientId)) return null;
 
   room.playbackState = {
     isPlaying: isPlaying ?? room.playbackState.isPlaying,
-    timestamp: typeof timestamp === "number" ? timestamp : room.playbackState.timestamp,
+    timestamp: typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp >= 0
+      ? timestamp
+      : room.playbackState.timestamp,
     updatedAt: Date.now(),
   };
   persist(room);

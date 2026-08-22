@@ -1,3 +1,13 @@
+// ---------------------------------------------------------------------------
+// Socket Event Handlers — Security-Hardened
+// ---------------------------------------------------------------------------
+// Every handler now:
+//   1. Validates & sanitizes ALL incoming fields (type + length + content)
+//   2. Checks rate limits before processing
+//   3. Enforces authorization (host-only actions)
+//   4. Wraps async work in try-catch so no unhandled promise rejections
+// ---------------------------------------------------------------------------
+
 import {
   joinRoom,
   disconnectSocket,
@@ -16,6 +26,25 @@ import {
   getRoom,
 } from "../utils/roomManager.js";
 import { extractYoutubeId, fetchYoutubeMeta } from "../utils/youtube.js";
+import {
+  validateRoomId,
+  validateClientId,
+  validateName,
+  validateText,
+  validateUrl,
+  validateItemId,
+  validateEmoji,
+  validateTimestamp,
+} from "../utils/sanitize.js";
+import { createSocketRateLimiter } from "../utils/rateLimiter.js";
+import { createLogger } from "../utils/logger.js";
+
+const log = createLogger("socket");
+const limiter = createSocketRateLimiter();
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function broadcastState(io, roomId) {
   const room = getRoom(roomId);
@@ -23,179 +52,386 @@ function broadcastState(io, roomId) {
   io.to(roomId).emit("sync-state", serializeRoom(room));
 }
 
+/** Shortcut: rate-limit check. Returns true if the event should be blocked. */
+function rateLimited(socket, event, ack) {
+  if (!limiter.allow(socket, event)) {
+    ack?.({ ok: false, error: "Too many requests, slow down" });
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Handler Registration
+// ---------------------------------------------------------------------------
+
 export function registerRoomHandlers(io, socket) {
-  socket.on("join-room", async ({ roomId, clientId, name }, ack) => {
-    if (!roomId || !clientId) return ack?.({ ok: false, error: "Missing roomId or clientId" });
 
-    const room = await joinRoom(roomId, clientId, socket.id, name?.trim() || "Anonymous");
-    if (!room) return ack?.({ ok: false, error: "Room not found" });
+  // -----------------------------------------------------------------------
+  // JOIN ROOM
+  // -----------------------------------------------------------------------
+  socket.on("join-room", async (payload, ack) => {
+    try {
+      if (rateLimited(socket, "join-room", ack)) return;
 
-    socket.data.roomId = roomId;
-    socket.data.clientId = clientId;
-    socket.join(roomId);
+      const roomId   = validateRoomId(payload?.roomId);
+      // clientId comes from socket auth middleware (tamper-proof), not payload
+      const clientId = socket.data.clientId;
+      const name     = validateName(payload?.name) || "Anonymous";
 
-    // Chat history rides along with the join ack (not sync-state) since it's
-    // only needed once, on entry — new messages after that arrive one at a
-    // time over the "chat-message" event instead of resending the whole log.
-    ack?.({ ok: true, state: serializeRoom(room), chatHistory: room.messages.slice(-50) });
-    broadcastState(io, roomId);
+      if (!roomId || !clientId) {
+        return ack?.({ ok: false, error: "Missing or invalid roomId / clientId" });
+      }
+
+      const result = await joinRoom(roomId, clientId, socket.id, name);
+
+      if (result === "ROOM_FULL") {
+        return ack?.({ ok: false, error: "Room is full (max 50 users)" });
+      }
+      if (!result) {
+        return ack?.({ ok: false, error: "Room not found" });
+      }
+
+      socket.data.roomId = roomId;
+      socket.join(roomId);
+
+      ack?.({ ok: true, state: serializeRoom(result), chatHistory: result.messages.slice(-50) });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("join-room error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  socket.on("add-to-queue", async ({ url }, ack) => {
-    const { roomId, clientId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+  // -----------------------------------------------------------------------
+  // ADD TO QUEUE
+  // -----------------------------------------------------------------------
+  socket.on("add-to-queue", async (payload, ack) => {
+    try {
+      if (rateLimited(socket, "add-to-queue", ack)) return;
 
-    const videoId = extractYoutubeId(url);
-    if (!videoId) return ack?.({ ok: false, error: "Couldn't find a YouTube video in that link" });
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
 
-    const room = getRoom(roomId);
-    const addedBy = room?.users.get(clientId)?.name ?? "Unknown";
-    const meta = await fetchYoutubeMeta(videoId);
+      const url = validateUrl(payload?.url);
+      if (!url) return ack?.({ ok: false, error: "Invalid URL" });
 
-    const updated = await addToQueue(roomId, {
-      source: "youtube",
-      trackId: videoId,
-      title: meta.title,
-      thumbnail: meta.thumbnail,
-      addedBy,
-    });
+      const videoId = extractYoutubeId(url);
+      if (!videoId) return ack?.({ ok: false, error: "Couldn't find a YouTube video in that link" });
 
-    if (!updated) return ack?.({ ok: false, error: "Room not found" });
-    ack?.({ ok: true });
-    broadcastState(io, roomId);
+      const room = getRoom(roomId);
+      const addedBy = room?.users.get(clientId)?.name ?? "Unknown";
+      const meta = await fetchYoutubeMeta(videoId);
+
+      const updated = await addToQueue(roomId, {
+        source: "youtube",
+        trackId: videoId,
+        title: meta.title,
+        thumbnail: meta.thumbnail,
+        addedBy,
+        addedByClientId: clientId,
+      });
+
+      if (updated === "QUEUE_FULL") return ack?.({ ok: false, error: "Queue is full (max 100 tracks)" });
+      if (!updated) return ack?.({ ok: false, error: "Room not found" });
+      ack?.({ ok: true });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("add-to-queue error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  socket.on("remove-from-queue", ({ itemId }, ack) => {
-    const { roomId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+  // -----------------------------------------------------------------------
+  // REMOVE FROM QUEUE — host or track owner only
+  // -----------------------------------------------------------------------
+  socket.on("remove-from-queue", (payload, ack) => {
+    try {
+      if (rateLimited(socket, "remove-from-queue", ack)) return;
 
-    const updated = removeFromQueue(roomId, itemId);
-    if (!updated) return ack?.({ ok: false, error: "Room not found" });
-    ack?.({ ok: true });
-    broadcastState(io, roomId);
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+      const itemId = validateItemId(payload?.itemId);
+      if (!itemId) return ack?.({ ok: false, error: "Invalid itemId" });
+
+      const updated = removeFromQueue(roomId, itemId, clientId);
+      if (updated === "NOT_AUTHORIZED") return ack?.({ ok: false, error: "Only the host or the track owner can remove it" });
+      if (!updated) return ack?.({ ok: false, error: "Track not found in queue" });
+      ack?.({ ok: true });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("remove-from-queue error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  socket.on("vote-queue-item", ({ itemId }, ack) => {
-    const { roomId, clientId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+  // -----------------------------------------------------------------------
+  // VOTE
+  // -----------------------------------------------------------------------
+  socket.on("vote-queue-item", (payload, ack) => {
+    try {
+      if (rateLimited(socket, "vote-queue-item", ack)) return;
 
-    const updated = voteForTrack(roomId, itemId, clientId);
-    if (!updated) return ack?.({ ok: false, error: "Track not found in queue" });
-    ack?.({ ok: true });
-    broadcastState(io, roomId);
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+      const itemId = validateItemId(payload?.itemId);
+      if (!itemId) return ack?.({ ok: false, error: "Invalid itemId" });
+
+      const updated = voteForTrack(roomId, itemId, clientId);
+      if (!updated) return ack?.({ ok: false, error: "Track not found in queue" });
+      ack?.({ ok: true });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("vote-queue-item error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  socket.on("increment-repeat", ({ itemId }, ack) => {
-    const { roomId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+  // -----------------------------------------------------------------------
+  // INCREMENT REPEAT — host only
+  // -----------------------------------------------------------------------
+  socket.on("increment-repeat", (payload, ack) => {
+    try {
+      if (rateLimited(socket, "increment-repeat", ack)) return;
 
-    const updated = incrementRepeat(roomId, itemId);
-    if (!updated) return ack?.({ ok: false, error: "Track not found" });
-    ack?.({ ok: true });
-    broadcastState(io, roomId);
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+      const itemId = validateItemId(payload?.itemId);
+      if (!itemId) return ack?.({ ok: false, error: "Invalid itemId" });
+
+      const updated = incrementRepeat(roomId, itemId, clientId);
+      if (updated === "NOT_HOST") return ack?.({ ok: false, error: "Only a host can change repeat count" });
+      if (!updated) return ack?.({ ok: false, error: "Track not found" });
+      ack?.({ ok: true });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("increment-repeat error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  // Adds a past track back into the queue — normal add-to-queue semantics.
-  socket.on("queue-from-history", async ({ historyItemId }, ack) => {
-    const { roomId, clientId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+  // -----------------------------------------------------------------------
+  // QUEUE FROM HISTORY
+  // -----------------------------------------------------------------------
+  socket.on("queue-from-history", async (payload, ack) => {
+    try {
+      if (rateLimited(socket, "queue-from-history", ack)) return;
 
-    const room = getRoom(roomId);
-    const addedBy = room?.users.get(clientId)?.name ?? "Unknown";
-    const updated = await queueFromHistory(roomId, historyItemId, addedBy);
-    if (!updated) return ack?.({ ok: false, error: "Not found in history" });
-    ack?.({ ok: true });
-    broadcastState(io, roomId);
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+      const historyItemId = validateItemId(payload?.historyItemId);
+      if (!historyItemId) return ack?.({ ok: false, error: "Invalid historyItemId" });
+
+      const room = getRoom(roomId);
+      const addedBy = room?.users.get(clientId)?.name ?? "Unknown";
+      const updated = await queueFromHistory(roomId, historyItemId, addedBy, clientId);
+      if (updated === "QUEUE_FULL") return ack?.({ ok: false, error: "Queue is full" });
+      if (!updated) return ack?.({ ok: false, error: "Not found in history" });
+      ack?.({ ok: true });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("queue-from-history error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  // Plays a past track right now, interrupting whatever's currently playing.
-  socket.on("replay-now", ({ historyItemId }, ack) => {
-    const { roomId, clientId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+  // -----------------------------------------------------------------------
+  // REPLAY NOW — host only
+  // -----------------------------------------------------------------------
+  socket.on("replay-now", (payload, ack) => {
+    try {
+      if (rateLimited(socket, "replay-now", ack)) return;
 
-    const room = getRoom(roomId);
-    const addedBy = room?.users.get(clientId)?.name ?? "Unknown";
-    const updated = replayNow(roomId, clientId, historyItemId, addedBy);
-    if (!updated) return ack?.({ ok: false, error: "Only a host can replay a track immediately" });
-    ack?.({ ok: true });
-    broadcastState(io, roomId);
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+      const historyItemId = validateItemId(payload?.historyItemId);
+      if (!historyItemId) return ack?.({ ok: false, error: "Invalid historyItemId" });
+
+      const room = getRoom(roomId);
+      const addedBy = room?.users.get(clientId)?.name ?? "Unknown";
+      const updated = replayNow(roomId, clientId, historyItemId, addedBy);
+      if (!updated) return ack?.({ ok: false, error: "Only a host can replay a track immediately" });
+      ack?.({ ok: true });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("replay-now error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  socket.on("chat-message", ({ text }, ack) => {
-    const { roomId, clientId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+  // -----------------------------------------------------------------------
+  // CHAT MESSAGE
+  // -----------------------------------------------------------------------
+  socket.on("chat-message", (payload, ack) => {
+    try {
+      if (rateLimited(socket, "chat-message", ack)) return;
 
-    const trimmed = (text ?? "").trim().slice(0, 500);
-    if (!trimmed) return ack?.({ ok: false, error: "Message is empty" });
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
 
-    const room = getRoom(roomId);
-    const name = room?.users.get(clientId)?.name ?? "Unknown";
-    const message = sendMessage(roomId, clientId, name, trimmed);
-    if (!message) return ack?.({ ok: false, error: "Room not found" });
+      const trimmed = validateText(payload?.text);
+      if (!trimmed) return ack?.({ ok: false, error: "Message is empty or invalid" });
 
-    ack?.({ ok: true });
-    io.to(roomId).emit("chat-message", message);
+      const room = getRoom(roomId);
+      const name = room?.users.get(clientId)?.name ?? "Unknown";
+      const message = sendMessage(roomId, clientId, name, trimmed);
+      if (!message) return ack?.({ ok: false, error: "Room not found" });
+
+      ack?.({ ok: true });
+      io.to(roomId).emit("chat-message", message);
+    } catch (err) {
+      log.error("chat-message error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  // Pure ephemeral relay — no room state, no persistence. Every connected
-  // client just gets told "someone reacted with X" and animates it locally.
-  socket.on("reaction", ({ emoji }) => {
-    const { roomId, clientId } = socket.data;
-    if (!roomId || typeof emoji !== "string" || !emoji) return;
+  // -----------------------------------------------------------------------
+  // REACTION — ephemeral relay
+  // -----------------------------------------------------------------------
+  socket.on("reaction", (payload) => {
+    try {
+      if (!limiter.allow(socket, "reaction")) return;
 
-    const room = getRoom(roomId);
-    const name = room?.users.get(clientId)?.name ?? "Someone";
-    io.to(roomId).emit("reaction", { emoji: emoji.slice(0, 8), name });
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return;
+
+      const emoji = validateEmoji(payload?.emoji);
+      if (!emoji) return;
+
+      const room = getRoom(roomId);
+      const name = room?.users.get(clientId)?.name ?? "Someone";
+      io.to(roomId).emit("reaction", { emoji, name });
+    } catch (err) {
+      log.error("reaction error:", err.message);
+    }
   });
 
+  // -----------------------------------------------------------------------
+  // NEXT SONG (Skip) — host only
+  // -----------------------------------------------------------------------
   socket.on("next-song", (_payload, ack) => {
-    const { roomId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+    try {
+      if (rateLimited(socket, "next-song", ack)) return;
 
-    const updated = nextSong(roomId);
-    if (!updated) return ack?.({ ok: false, error: "Room not found" });
-    ack?.({ ok: true });
-    broadcastState(io, roomId);
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+      const updated = nextSong(roomId, clientId);
+      if (updated === "NOT_HOST") return ack?.({ ok: false, error: "Only a host can skip" });
+      if (!updated) return ack?.({ ok: false, error: "Room not found" });
+      ack?.({ ok: true });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("next-song error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  // Natural end-of-track (not a manual Skip) — respects repeatCount.
+  // -----------------------------------------------------------------------
+  // TRACK ENDED — debounced, natural end-of-track
+  // -----------------------------------------------------------------------
   socket.on("track-ended", (_payload, ack) => {
-    const { roomId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+    try {
+      if (rateLimited(socket, "track-ended", ack)) return;
 
-    const updated = trackEnded(roomId);
-    if (!updated) return ack?.({ ok: false, error: "Room not found" });
-    ack?.({ ok: true });
-    broadcastState(io, roomId);
+      const { roomId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+      const updated = trackEnded(roomId);
+      if (!updated) return ack?.({ ok: false, error: "Room not found" });
+      ack?.({ ok: true });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("track-ended error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
-  socket.on("play", ({ timestamp }, ack) => handlePlayback(socket, io, ack, { isPlaying: true, timestamp }));
-  socket.on("pause", ({ timestamp }, ack) => handlePlayback(socket, io, ack, { isPlaying: false, timestamp }));
-  socket.on("seek", ({ timestamp }, ack) => handlePlayback(socket, io, ack, { timestamp }));
-
-  // Any existing host can grant host status to someone else — adds them
-  // alongside the current hosts rather than replacing anyone, so a room can
-  // have several hosts driving playback at once.
-  socket.on("make-host", ({ targetClientId }, ack) => {
-    const { roomId, clientId } = socket.data;
-    if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
-
-    const updated = addHost(roomId, clientId, targetClientId);
-    if (!updated) return ack?.({ ok: false, error: "Only a host can grant host access" });
-    ack?.({ ok: true });
-    broadcastState(io, roomId);
+  // -----------------------------------------------------------------------
+  // PLAYBACK CONTROLS — host only (play / pause / seek)
+  // -----------------------------------------------------------------------
+  socket.on("play", (payload, ack) => {
+    try {
+      const ts = validateTimestamp(payload?.timestamp);
+      handlePlayback(socket, io, ack, { isPlaying: true, timestamp: ts ?? 0 });
+    } catch (err) {
+      log.error("play error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
   });
 
+  socket.on("pause", (payload, ack) => {
+    try {
+      const ts = validateTimestamp(payload?.timestamp);
+      handlePlayback(socket, io, ack, { isPlaying: false, timestamp: ts ?? 0 });
+    } catch (err) {
+      log.error("pause error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
+  });
+
+  socket.on("seek", (payload, ack) => {
+    try {
+      const ts = validateTimestamp(payload?.timestamp);
+      if (ts === null) return ack?.({ ok: false, error: "Invalid timestamp" });
+      handlePlayback(socket, io, ack, { timestamp: ts });
+    } catch (err) {
+      log.error("seek error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // MAKE HOST — host only can grant
+  // -----------------------------------------------------------------------
+  socket.on("make-host", (payload, ack) => {
+    try {
+      if (rateLimited(socket, "make-host", ack)) return;
+
+      const { roomId, clientId } = socket.data;
+      if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
+
+      const targetClientId = validateClientId(payload?.targetClientId);
+      if (!targetClientId) return ack?.({ ok: false, error: "Invalid targetClientId" });
+
+      const updated = addHost(roomId, clientId, targetClientId);
+      if (!updated) return ack?.({ ok: false, error: "Only a host can grant host access" });
+      ack?.({ ok: true });
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("make-host error:", err.message);
+      ack?.({ ok: false, error: "Internal error" });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // DISCONNECT
+  // -----------------------------------------------------------------------
   socket.on("disconnect", () => {
-    const { roomId, clientId } = socket.data;
-    if (!roomId || !clientId) return;
+    try {
+      const { roomId, clientId } = socket.data;
+      if (!roomId || !clientId) return;
 
-    disconnectSocket(roomId, clientId, socket.id);
-    broadcastState(io, roomId);
+      disconnectSocket(roomId, clientId, socket.id);
+      broadcastState(io, roomId);
+    } catch (err) {
+      log.error("disconnect error:", err.message);
+    }
   });
 }
 
+// ---------------------------------------------------------------------------
+// Internal
+// ---------------------------------------------------------------------------
+
 function handlePlayback(socket, io, ack, changes) {
+  if (rateLimited(socket, "playback", ack)) return;
+
   const { roomId, clientId } = socket.data;
   if (!roomId) return ack?.({ ok: false, error: "Not in a room" });
 

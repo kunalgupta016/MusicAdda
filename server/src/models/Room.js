@@ -8,6 +8,9 @@ const QueueItemSchema = new mongoose.Schema(
     title: { type: String, default: "Untitled" },
     thumbnail: { type: String, default: "" },
     addedBy: { type: String, default: "Unknown" },
+    // SECURITY: Track which clientId added the track so permission checks
+    // for removal can verify ownership (not just the display name).
+    addedByClientId: { type: String, default: "" },
     addedAt: { type: Date, default: Date.now },
     votes: { type: [String], default: [] },
     repeatCount: { type: Number, default: 1 },
