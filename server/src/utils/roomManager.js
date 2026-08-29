@@ -15,6 +15,7 @@
 import { nanoid, customAlphabet } from "nanoid";
 import Room from "../models/Room.js";
 import { isDbConnected } from "../config/db.js";
+import { deleteFromGridFS } from "./gridfs.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("roomManager");
@@ -33,8 +34,10 @@ const MAX_QUEUE_SIZE    = 100;
 const MAX_HISTORY       = 50;
 const MAX_MESSAGES      = 200;
 const MAX_REPEAT        = 10;
-const ROOM_TTL_MS       = 30 * 60 * 1000;           // 30 minutes with 0 users
-const CLEANUP_INTERVAL  = 5 * 60 * 1000;             // run cleanup every 5 min
+export const MAX_NOTES_PER_ROOM = 20;
+export const MAX_NOTE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB — keeps the free Atlas tier from filling up fast
+const ROOM_TTL_MS       = 3 * 1000;           // TEMP-TEST-VALUE
+const CLEANUP_INTERVAL  = 2 * 1000;             // TEMP-TEST-VALUE
 const TRACK_ENDED_DEBOUNCE_MS = 3000;                // 3 s debounce
 
 // In-memory source of truth for active rooms. MongoDB is used only for
@@ -50,9 +53,10 @@ function freshPlaybackState() {
   return { isPlaying: false, timestamp: 0, updatedAt: Date.now() };
 }
 
-function newRoomState(roomId) {
+function newRoomState(roomId, roomType = "music") {
   return {
     roomId,
+    roomType,
     hostClientIds: new Set(),
     users: new Map(),               // clientId -> { name, socketId, connected }
     queue: [],
@@ -60,6 +64,7 @@ function newRoomState(roomId) {
     playbackState: freshPlaybackState(),
     history: [],                    // most-recently-played first, capped at MAX_HISTORY
     messages: [],                   // chat log, capped at MAX_MESSAGES
+    notes: [],                      // study rooms only — shared PDFs
     lastEmptyAt: null,              // timestamp when last user disconnected (for TTL)
     lastTrackEndedAt: 0,            // debounce guard for track-ended events
   };
@@ -71,12 +76,14 @@ function persist(room) {
     { roomId: room.roomId },
     {
       roomId: room.roomId,
+      roomType: room.roomType,
       hostClientIds: Array.from(room.hostClientIds),
       queue: room.queue,
       currentTrack: room.currentTrack,
       playbackState: room.playbackState,
       history: room.history,
       messages: room.messages,
+      notes: room.notes,
       lastActiveAt: new Date(),
     },
     { upsert: true }
@@ -101,6 +108,21 @@ function countConnectedUsers(room) {
 // Room TTL Cleanup (runs every CLEANUP_INTERVAL)
 // ---------------------------------------------------------------------------
 
+// Deletes the room doc AND every PDF it was holding in GridFS. Without the
+// note cleanup, a study room's files would outlive the room itself forever —
+// orphaned bytes nobody can reach, silently eating the free-tier quota.
+async function deleteRoomFromDb(roomId, notes) {
+  if (!isDbConnected()) return;
+  try {
+    for (const note of notes) {
+      await deleteFromGridFS(note.fileId);
+    }
+    await Room.deleteOne({ roomId });
+  } catch (err) {
+    log.error(`DB cleanup failed for ${roomId}:`, err.message);
+  }
+}
+
 function cleanupStaleRooms() {
   const now = Date.now();
   for (const [roomId, room] of rooms) {
@@ -109,6 +131,7 @@ function cleanupStaleRooms() {
         room.lastEmptyAt = now;
       } else if (now - room.lastEmptyAt > ROOM_TTL_MS) {
         rooms.delete(roomId);
+        deleteRoomFromDb(roomId, room.notes);
         log.info(`Evicted stale room ${roomId} (no users for ${Math.round(ROOM_TTL_MS / 60000)} min)`);
       }
     } else {
@@ -125,7 +148,7 @@ if (_cleanupTimer.unref) _cleanupTimer.unref();
 // Public API
 // ---------------------------------------------------------------------------
 
-export async function createRoom() {
+export async function createRoom(roomType = "music") {
   // SECURITY: prevent resource exhaustion
   if (rooms.size >= MAX_ROOMS) {
     log.warn(`Room creation rejected — MAX_ROOMS (${MAX_ROOMS}) reached`);
@@ -135,7 +158,7 @@ export async function createRoom() {
   let roomId = generateRoomId();
   while (rooms.has(roomId)) roomId = generateRoomId();
 
-  const room = newRoomState(roomId);
+  const room = newRoomState(roomId, roomType === "study" ? "study" : "music");
   rooms.set(roomId, room);
   persist(room);
   return roomId;
@@ -156,13 +179,14 @@ async function loadRoom(roomId) {
   if (isDbConnected()) {
     const doc = await Room.findOne({ roomId }).lean();
     if (doc) {
-      const room = newRoomState(roomId);
+      const room = newRoomState(roomId, doc.roomType);
       room.hostClientIds = new Set(doc.hostClientIds ?? []);
       room.queue = doc.queue ?? [];
       room.currentTrack = doc.currentTrack ?? null;
       room.playbackState = doc.playbackState ?? freshPlaybackState();
       room.history = doc.history ?? [];
       room.messages = doc.messages ?? [];
+      room.notes = doc.notes ?? [];
       rooms.set(roomId, room);
       return room;
     }
@@ -173,6 +197,7 @@ async function loadRoom(roomId) {
 export function serializeRoom(room) {
   return {
     roomId: room.roomId,
+    roomType: room.roomType,
     hostClientIds: Array.from(room.hostClientIds),
     users: Array.from(room.users.entries())
       .filter(([, u]) => u.connected)
@@ -185,6 +210,7 @@ export function serializeRoom(room) {
     currentTrack: room.currentTrack,
     playbackState: room.playbackState,
     history: room.history,
+    notes: room.notes,
   };
 }
 
@@ -435,6 +461,41 @@ export function trackEnded(roomId) {
   // Advance to next — no clientId check here since track-ended is a natural
   // end-of-playback event, not a user-initiated skip.
   return nextSong(roomId, null);
+}
+
+// Study rooms only. The actual PDF bytes live in GridFS — this just tracks
+// the metadata (and permission-checked ownership, same pattern as queue
+// items) in the room's synced state.
+export function addNote(roomId, note) {
+  const room = rooms.get(roomId);
+  if (!room) return null;
+  if (room.notes.length >= MAX_NOTES_PER_ROOM) return "NOTES_FULL";
+
+  room.notes.push(note);
+  persist(room);
+  return room;
+}
+
+// SECURITY: only host or the person who uploaded it can remove
+export function removeNote(roomId, noteId, clientId) {
+  const room = rooms.get(roomId);
+  if (!room) return null;
+
+  const note = room.notes.find((n) => n.noteId === noteId);
+  if (!note) return null;
+
+  const isHostUser = room.hostClientIds.has(clientId);
+  const isOwner = note.uploadedByClientId && note.uploadedByClientId === clientId;
+  if (!isHostUser && !isOwner) return "NOT_AUTHORIZED";
+
+  room.notes = room.notes.filter((n) => n.noteId !== noteId);
+  persist(room);
+  return { room, deletedFileId: note.fileId };
+}
+
+export function findNote(roomId, noteId) {
+  const room = rooms.get(roomId);
+  return room?.notes.find((n) => n.noteId === noteId) ?? null;
 }
 
 export function sendMessage(roomId, clientId, name, text) {

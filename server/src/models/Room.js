@@ -32,6 +32,19 @@ const HistoryItemSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const NoteSchema = new mongoose.Schema(
+  {
+    noteId: { type: String, required: true },
+    fileId: { type: mongoose.Schema.Types.ObjectId, required: true }, // GridFS file _id
+    filename: { type: String, required: true },
+    sizeBytes: { type: Number, required: true },
+    uploadedBy: { type: String, default: "Unknown" },
+    uploadedByClientId: { type: String, default: "" },
+    uploadedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const MessageSchema = new mongoose.Schema(
   {
     id: { type: String, required: true },
@@ -54,12 +67,14 @@ const PlaybackStateSchema = new mongoose.Schema(
 
 const RoomSchema = new mongoose.Schema({
   roomId: { type: String, required: true, unique: true, index: true },
+  roomType: { type: String, enum: ["music", "study"], default: "music" },
   hostClientIds: { type: [String], default: [] },
   queue: { type: [QueueItemSchema], default: [] },
   currentTrack: { type: QueueItemSchema, default: null },
   playbackState: { type: PlaybackStateSchema, default: () => ({}) },
   history: { type: [HistoryItemSchema], default: [] },
   messages: { type: [MessageSchema], default: [] },
+  notes: { type: [NoteSchema], default: [] }, // study rooms only — shared PDFs
   createdAt: { type: Date, default: Date.now },
   lastActiveAt: { type: Date, default: Date.now },
 });

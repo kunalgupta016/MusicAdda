@@ -29,12 +29,13 @@ const checkRoomLimiter = rateLimit({
 // Routes
 // ---------------------------------------------------------------------------
 
-router.post("/", createRoomLimiter, async (_req, res) => {
-  const roomId = await createRoom();
+router.post("/", createRoomLimiter, async (req, res) => {
+  const roomType = req.body?.roomType === "study" ? "study" : "music";
+  const roomId = await createRoom(roomType);
   if (!roomId) {
     return res.status(503).json({ error: "Server at room capacity. Try again later." });
   }
-  res.status(201).json({ roomId });
+  res.status(201).json({ roomId, roomType });
 });
 
 router.get("/:roomId", checkRoomLimiter, async (req, res) => {

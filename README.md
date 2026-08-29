@@ -19,6 +19,7 @@ Create a room, share the link, paste a YouTube video — everyone in the room he
 | 🎉 **Floating reactions** | Drop a ❤️ 🔥 😂 👏 ☕ mid-song and watch it float up for everyone — like a live stream, zero setup. |
 | 🗳️ **Upvote the queue** | Anyone can upvote a queued track — the most-upvoted song plays next. Democratic, not host-gated. |
 | 🕘 **Session history** | Every track that's played is logged with a timestamp — **Replay** (host-only) jumps to it right now, **+ Queue** (anyone) adds it back to the end of the line. |
+| 📚 **Study rooms** | A second room type, chosen on the landing page. Everything above still works (synced video, chat, reactions) — plus anyone can share PDFs, which everyone reads at their own pace. PDFs are stored in the existing MongoDB Atlas cluster via GridFS, no separate storage service needed. |
 
 ---
 

@@ -14,6 +14,7 @@ import UserList from "../components/UserList";
 import AddTrackForm from "../components/AddTrackForm";
 import ChatPanel from "../components/ChatPanel";
 import HistoryPanel from "../components/HistoryPanel";
+import NotesPanel from "../components/NotesPanel";
 
 function NameGate({ onSubmit }) {
   const [name, setName] = useState(getSavedName());
@@ -308,6 +309,11 @@ function RoomView({ roomId, name }) {
       <header className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2">
         <h1 className="font-heading text-2xl font-bold text-tapri-brown">
           music<span className="text-tapri-terracotta">Adda</span> <span className="text-lg">☕</span>
+          {state.roomType === "study" && (
+            <span className="ml-2 rounded-full bg-tapri-mustard/30 px-2 py-0.5 align-middle text-xs font-semibold text-tapri-brown-light">
+              📚 Study Room
+            </span>
+          )}
         </h1>
         <button
           onClick={handleCopyLink}
@@ -348,6 +354,15 @@ function RoomView({ roomId, name }) {
             </h2>
             <AddTrackForm onAdd={actions.addToQueue} />
           </div>
+
+          {state.roomType === "study" && (
+            <div>
+              <h2 className="mb-2 font-heading text-sm font-semibold uppercase tracking-wide text-tapri-brown-light">
+                📚 Study Notes
+              </h2>
+              <NotesPanel roomId={roomId} clientId={clientId} notes={state.notes ?? []} isHost={isHost} />
+            </div>
+          )}
 
           <div>
             <h2 className="mb-2 font-heading text-sm font-semibold uppercase tracking-wide text-tapri-brown-light">

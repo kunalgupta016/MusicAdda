@@ -14,6 +14,7 @@ import mongoose from "mongoose";
 import { validateEnv } from "./utils/envValidator.js";
 import { connectDb } from "./config/db.js";
 import roomRoutes from "./routes/roomRoutes.js";
+import notesRoutes from "./routes/notesRoutes.js";
 import { registerSocketHandlers } from "./sockets/index.js";
 import { createLogger } from "./utils/logger.js";
 
@@ -91,6 +92,7 @@ app.use(
 // ---------------------------------------------------------------------------
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/rooms", roomRoutes);
+app.use("/api/rooms", notesRoutes);
 
 // ---------------------------------------------------------------------------
 // 8. SECURITY: Global error handler — never leak stack traces
@@ -112,6 +114,9 @@ const io = new Server(httpServer, {
 });
 
 registerSocketHandlers(io);
+// Lets the REST notes routes broadcast a sync-state after an upload/delete,
+// same as every socket handler already does.
+app.set("io", io);
 
 // ---------------------------------------------------------------------------
 // 10. Start
